@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Upcoming Shows Map</title>
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.css" rel="stylesheet"/>
+  <style>
+    html, body { margin:0; padding:0; }
+    #map { width:100%; height:600px; } /* Adjust height as needed */
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.js"></script>
+  <script>
+    // Mapbox token (public)
+    const MAPBOX_TOKEN = "pk.eyJ1IjoiYXBlZm9yZ2UiLCJhIjoiY21hazEzdGJkMTR4MTJzcTMzZjY1Y2JhNCJ9.M1TI3RrRto6Rv6_z0Zjv3w";
+
+    // Our same-origin proxy (no CORS issues):
+    const SHOWS_API = "/api/shows";
+
+    // Adalo field names (per your schema)
+    const FIELD_NAME    = "Name";
+    const FIELD_START   = "Show Start";
+    const FIELD_END     = "Show End";
+    const FIELD_ADDRESS = "Address";
+    const FIELD_ACTIVE  = "Active"; // optional
+
+    function startOfDay(d){ const x=new Date(d); x.setHours(0,0,0,0); return x; }
+    function asDate(v){ if(!v) return null; const t=Date.parse(v); return isNaN(t)?null:new Date(t); }
+    function isUpcoming(v){ const d=asDate(v); return d && d >= startOfDay(new Date()); }
+
+    function fmtRange(startVal, endVal){
+      const s = asDate(startVal), e = asDate(endVal);
+      if (!s) return "";
+      const d = s.toLocaleDateString();
+      const t1 = s.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      if (e) {
+        const t2 = e.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        return `${d} • ${t1} – ${t2}`;
+      }
+      return `${d} • ${t1}`;
+    }
+
+    async function geocode(addr){
+      const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(addr)}.json?limit=1&access_token=${MAPBOX_TOKEN}`;
+      const r = await fetch(url);
+      if (!r.ok) return null;
+      const j = await r.json();
+      return (j.features && j.features[0]) || null;
+    }
+
+    // Map init
+    mapboxgl.accessToken = MAPBOX_TOKEN;
+    const map = new mapboxgl.Map({
+      container: "map",
+      style: "mapbox://styles/mapbox/streets-v11",
+      center: [-98.5795, 39.8283],
+      zoom: 3
+    });
+    map.addControl(new mapboxgl.NavigationControl(), "top-right");
+
+    (async function run(){
+      try {
+        // Same-origin call to our proxy
+        const res = await fetch(SHOWS_API, { headers: { "Accept": "application/json" } });
+        if (!res.ok) throw new Error("Proxy HTTP " + res.status);
+        const data = await res.json();
+        const all = Array.isArray(data.records) ? data.records : [];
+
+        // Only upcoming (and Active==true if present)
+        const shows = all
+          .filter(r => ((FIELD_ACTIVE in r) ? !!r[FIELD_ACTIVE] : true) && isUpcoming(r[FIELD_START]))
+          .sort((a,b) => (asDate(a[FIELD_START])?.getTime()||0) - (asDate(b[FIELD_START])?.getTime()||0));
+
+        if (!shows.length) return;
+
+        const bounds = new mapboxgl.LngLatBounds();
+        const cache = new Map();
+
+        for (const s of shows) {
+          const addr = s[FIELD_ADDRESS];
+          if (!addr) continue;
+
+          const key = addr.trim();
+          const feat = cache.has(key) ? cache.get(key) : await geocode(key);
+          cache.set(key, feat);
+          if (!feat) continue;
+
+          const [lng, lat] = feat.center;
+          const name = s[FIELD_NAME] || "Show";
+          const when = fmtRange(s[FIELD_START], s[FIELD_END]);
+
+          new mapboxgl.Marker()
+            .setLngLat([lng, lat])
+            .setPopup(new mapboxgl.Popup({ offset: 10 }).setHTML(
+              `<strong>${name}</strong><br>${addr}${when ? `<br>${when}` : ""}`
+            ))
+            .addTo(map);
+
+          bounds.extend([lng, lat]);
+        }
+
+        if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 60, maxZoom: 14 });
+      } catch (e) {
+        console.error("Map error:", e);
+      }
+    })();
+  </script>
+</body>
+</html>
